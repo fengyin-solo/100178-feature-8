@@ -28,6 +28,13 @@ class EntryPayload(BaseModel):
     remark: str | None = None
 
 
+class ImportPayload(BaseModel):
+    """按模板成批导入时提交的文件内容：content 为 CSV 原文，filename 仅用于展示。"""
+
+    content: str
+    filename: str | None = None
+
+
 
 class BoilerEntry(BaseModel):
     """锅炉设备明细结构。"""
