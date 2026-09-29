@@ -28,6 +28,31 @@ class EntryPayload(BaseModel):
     remark: str | None = None
 
 
+class ImportErrorItem(BaseModel):
+    """批量录入中被跳过的一行：行号、编号与逐条错误原因。"""
+
+    line: int
+    管道编号: str = ""
+    reasons: list[str] = Field(default_factory=list)
+    raw: dict[str, Any] = Field(default_factory=dict)
+
+
+class ImportResult(BaseModel):
+    """批量录入结果：合法行落库计数 + 问题行清单，便于修完问题行后续跑。"""
+
+    total: int = 0
+    created: int = 0
+    updated: int = 0
+    skipped: int = 0
+    errors: list[ImportErrorItem] = Field(default_factory=list)
+
+
+class ImportPayload(BaseModel):
+    """批量录入请求体：直接提交模板 CSV 的文本内容。"""
+
+    content: str
+
+
 
 class BoilerEntry(BaseModel):
     """锅炉设备明细结构。"""

@@ -1,33 +1,90 @@
 """压力管道接口：维护压力管道，覆盖办理投用、安排检修、停用管道等动作。"""
 from __future__ import annotations
 
+import csv
+import io
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import Response
 
-from app.schemas import ActionResult, EntryPayload, PageResult
+from app.schemas import ActionResult, EntryPayload, ImportPayload, ImportResult, PageResult
+from app.services.pressurepipe import LIST_FIELDS, OPTIONAL_COLUMNS, TEMPLATE_COLUMNS
 from app.services.pressurepipe import PressurepipeService
 
 router = APIRouter(prefix="/api/pressurepipe", tags=["压力管道"])
 
 service = PressurepipeService()
 
-LIST_FIELDS = ["管道编号", "管道名称", "管道级别", "公称直径", "输送介质", "敷设方式", "下次检验日", "管道状态"]
 STATUSES = ["待投用", "在用运行", "隔离检修", "已停用"]
+CSV_MEDIA_TYPE = "text/csv; charset=utf-8"
+
+
+def _csv_response(filename: str, header: list[str], rows: list[dict[str, Any]]) -> Response:
+    """生成带 BOM 的 CSV：Excel 直接打开不乱码，文件内容与接口数据一一对应。"""
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=header, extrasaction="ignore")
+    writer.writeheader()
+    for row in rows:
+        writer.writerow(row)
+    return Response(
+        content="﻿" + buffer.getvalue(),
+        media_type=CSV_MEDIA_TYPE,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("", response_model=PageResult[dict])
 def list_entries(
     keyword: str | None = Query(default=None, description="按管道编号检索"),
     status: str | None = Query(default=None, description="待投用、在用运行、隔离检修、已停用"),
+    level: str | None = Query(default=None, description="按管道级别检索"),
+    medium: str | None = Query(default=None, description="按输送介质检索"),
     page: int = 1,
     size: int = 20,
 ) -> PageResult[dict]:
-    """按管道编号与状态过滤压力管道列表；没有数据时返回空页，不报错。"""
+    """按管道编号、级别、介质与状态过滤压力管道列表；没有数据时返回空页，不报错。"""
     if size > 200:
         raise HTTPException(status_code=400, detail="每页最多 200 条，请缩小分页范围")
-    items, total = service.list_entries(keyword=keyword, status=status, page=page, size=size)
+    items, total = service.list_entries(
+        keyword=keyword, status=status, level=level, medium=medium, page=page, size=size
+    )
     return PageResult(items=items, total=total, page=page, size=size)
+
+
+@router.get("/template")
+def download_template() -> Response:
+    """下载批量录入模板：含必填列与选填列表头，另存后可直接填写再导入。"""
+    return _csv_response(
+        "pressurepipe-template.csv",
+        TEMPLATE_COLUMNS + OPTIONAL_COLUMNS,
+        [],
+    )
+
+
+@router.get("/export")
+def export_entries(
+    keyword: str | None = Query(default=None, description="按管道编号检索"),
+    status: str | None = Query(default=None, description="待投用、在用运行、隔离检修、已停用"),
+    level: str | None = Query(default=None, description="按管道级别检索"),
+    medium: str | None = Query(default=None, description="按输送介质检索"),
+) -> Response:
+    """另存压力管道清单：沿用列表当前过滤条件，全量不分页，文件结果与列表一致。"""
+    items = service.export_rows(keyword=keyword, status=status, level=level, medium=medium)
+    return _csv_response("pressurepipe-export.csv", ["id", *LIST_FIELDS], items)
+
+
+@router.post("/import", response_model=ImportResult)
+def import_entries(payload: ImportPayload) -> ImportResult:
+    """按模板成批录入：逐行校验，非法行与编号重复行跳过并逐条回报，合法行写入台账。
+
+    每行即时落库且按编号幂等更新，中断后拿同一份文件重新导入即可从失败行续跑。
+    """
+    try:
+        result = service.import_rows(payload.content)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ImportResult(**result)
 
 
 @router.get("/{entry_id}", response_model=dict)
@@ -56,10 +113,3 @@ def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
     if entry is None:
         return ActionResult(ok=False, message=message)
     return ActionResult(ok=True, message=message, entry=entry)
-
-
-@router.get("/export")
-def export_entries() -> dict[str, Any]:
-    """导出压力管道清单：返回当前过滤条件下的全量数据。"""
-    items, total = service.list_entries(page=1, size=10000)
-    return {"module": "pressurepipe", "total": total, "items": items}
